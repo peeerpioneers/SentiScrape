@@ -1,4 +1,4 @@
-#✅ SentiScrape 📘
+#✅ SentiScrape 📘  
 Sentiment sensor 
 
 📘 README.md
