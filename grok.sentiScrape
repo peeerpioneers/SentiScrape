@@ -1,0 +1,187 @@
+pip install requests beautifulsoup4 textblob yfinance
+import datetime
+from datetime import timedelta, date
+import json
+import requests
+from bs4 import BeautifulSoup
+from textblob import TextBlob
+import yfinance as yf
+import random  # for potential random sampling if needed
+
+def get_stock_price(ticker, input_date):
+    stock = yf.Ticker(ticker)
+    hist = stock.history(start=input_date, end=input_date + timedelta(days=1))
+    if hist.empty:
+        return None
+    return hist['Close'].iloc[0]
+
+def get_comments(ticker, input_date):
+    url = f'https://finance.yahoo.com/quote/{ticker}/community?p={ticker}'
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        return []
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+    script = soup.find(id='spotim-config')
+    if not script:
+        return []
+
+    try:
+        config_data = json.loads(script.string)
+    except json.JSONDecodeError:
+        return []
+
+    spot_id = config_data['config']['spotId']
+    uuid = config_data['config']['uuid'].replace('_', '$')
+    conversation_id = spot_id + uuid
+
+    api_url = 'https://api-2-0.spot.im/v1.0.0/conversation/read'
+    comments = []
+    offset = 0
+    count = 250
+    while True:
+        payload = {
+            'conversation_id': conversation_id,
+            'count': count,
+            'offset': offset
+        }
+        api_headers = headers.copy()
+        api_headers['Content-Type'] = 'application/json'
+        api_headers['x-spot-id'] = spot_id
+        api_headers['x-post-id'] = uuid
+
+        response = requests.post(api_url, headers=api_headers, json=payload)
+        if response.status_code != 200:
+            break
+
+        data = response.json()
+        events = data.get('data', {}).get('events', [])
+        if not events:
+            break
+
+        comments.extend(events)
+        offset += count
+
+    # Filter comments by date: last 30 days before input_date
+    from_timestamp = (input_date - timedelta(days=30)).timestamp() * 1000  # ms
+    to_timestamp = input_date.timestamp() * 1000  # ms
+
+    user_comments = {}
+    for event in comments:
+        if event.get('type') != 'message':
+            continue
+        created_at = event.get('created_at')
+        if not created_at or created_at < from_timestamp or created_at > to_timestamp:
+            continue
+        user_id = event.get('user_id')
+        text = event.get('text', '').strip()
+        if not text:
+            continue
+        if user_id not in user_comments:
+            user_comments[user_id] = []
+        user_comments[user_id].append({'text': text, 'created_at': created_at})
+
+    # Detect and exclude bots, repeat offenders, and bashers
+    excluded_users = set()
+    for user_id, coms in list(user_comments.items()):
+        # Repeat offenders: too many comments (>20)
+        if len(coms) > 20:
+            excluded_users.add(user_id)
+            continue
+
+        # Bots: low unique text ratio (repetitive comments)
+        texts = [c['text'] for c in coms]
+        unique_texts = set(texts)
+        if len(texts) > 1 and len(unique_texts) / len(texts) < 0.5:
+            excluded_users.add(user_id)
+            continue
+
+        # Bashers: consistently negative sentiment with multiple posts
+        if len(coms) > 3:
+            pols = [TextBlob(c['text']).sentiment.polarity for c in coms]
+            avg_pol = sum(pols) / len(pols)
+            if avg_pol < -0.2:
+                excluded_users.add(user_id)
+                continue
+
+    # Collect filtered texts, limiting to max 5 per user to avoid over-representation
+    filtered_texts = []
+    for user_id, coms in user_comments.items():
+        if user_id in excluded_users:
+            continue
+        user_texts = [c['text'] for c in coms][:5]
+        filtered_texts.extend(user_texts)
+
+    # Remove exact duplicates across all comments
+    filtered_texts = list(set(filtered_texts))
+
+    return filtered_texts, len(user_comments), len(excluded_users)
+
+def analyze_sentiment(comments):
+    positive = 0
+    negative = 0
+    for text in comments:
+        polarity = TextBlob(text).sentiment.polarity
+        if polarity > 0:
+            positive += 1
+        elif polarity < 0:
+            negative += 1
+    total = len(comments)
+    if total == 0:
+        return 0, 0, total
+    pos_perc = (positive / total) * 100
+    neg_perc = (negative / total) * 100
+    return pos_perc, neg_perc, total
+
+# Main app logic
+ticker = input("Enter stock ticker (e.g., AAPL): ").strip().upper()
+date_str = input("Enter date (YYYY-MM-DD), or press Enter for today: ").strip()
+
+if not date_str:
+    input_date = date.today()
+else:
+    try:
+        input_date = datetime.date.fromisoformat(date_str)
+    except ValueError:
+        print("Invalid date format. Using today.")
+        input_date = date.today()
+
+price = get_stock_price(ticker, input_date)
+if price is None:
+    print(f"No price data available for {ticker} on {input_date}.")
+    exit()
+
+comments, total_users, excluded_users = get_comments(ticker, input_date)
+pos_perc, neg_perc, count = analyze_sentiment(comments)
+
+# Calculate net sentiment
+net_sent = pos_perc - neg_perc
+
+# Probability of trending up/down (simple heuristic based on sentiment ratio)
+prob_up = max(0, min(100, 50 + (net_sent / 2)))
+prob_down = 100 - prob_up
+
+# Predicted next day price (simple: apply sentiment-driven percentage change, capped at ±5%)
+change_factor = (net_sent / 100) * 0.05
+pred_price = price * (1 + change_factor)
+
+# Confidence level (based on number of comments: scales up to 100% at 100 comments)
+confidence = min(100, (count / 100) * 100)
+
+# Data accuracy (based on proportion of non-excluded users)
+accuracy = 100 - ((excluded_users / total_users * 100) if total_users > 0 else 0)
+
+# Output
+print("\nApp Output:")
+print(f"Date: {input_date}")
+print(f"Ticker: {ticker}")
+print(f"Price on date: {price:.2f}")
+print(f"Comments count (filtered, last 30 days): {count}")
+print(f"Percent of sentiment positive: {pos_perc:.2f}%")
+print(f"Percent of sentiment negative: {neg_perc:.2f}%")
+print(f"Probability of trending up next trading day: {prob_up:.2f}%")
+print(f"Probability of trending down next trading day: {prob_down:.2f}%")
+print(f"Predicted next trading day price: {pred_price:.2f}")
+print(f"Confidence level: {confidence:.2f}%")
+print(f"Data accuracy percentage: {accuracy:.2f}%")
