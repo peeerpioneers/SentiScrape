@@ -1,0 +1,60 @@
+
+Running Bash Commands in Colab vs. GitHub
+Below are examples of how to install dependencies and run setup steps in both environments.
+
+1. Google Colab
+In a Colab notebook cell, prefix shell commands with ! or use a %%bash cell:
+
+bash
+# Cell type: Code
+!pip install pandas nltk playwright
+!python -m nltk.downloader vader_lexicon
+
+# If you’ve added Playwright:
+!playwright install
+Or combine into one Bash block:
+
+bash
+%%bash
+pip install -r requirements.txt
+python -m nltk.downloader vader_lexicon
+playwright install
+2. Local GitHub Repository
+In your README (or a setup.sh), instruct users to clone and run these in their terminal:
+
+bash
+git clone https://github.com/peeerpioneers/SentiScrape.git
+cd SentiScrape
+pip install -r requirements.txt
+python -m nltk.downloader vader_lexicon
+playwright install
+Put all Python deps in requirements.txt
+
+Add a setup.sh if you want a one-liner (sh setup.sh)
+
+3. Automated on GitHub Actions
+To run installs and tests on each push, add a workflow file at .github/workflows/python.yml:
+
+yaml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.9'
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        python -m nltk.downloader vader_lexicon
+        playwright install
+    - name: Run tests
+      run: pytest
+This ensures your repo installs and verifies everything in a clean, repeatable CI environment.
